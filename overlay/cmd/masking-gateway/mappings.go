@@ -19,9 +19,11 @@ import (
 
 const (
 	maxMappings      = 500
-	maxNameRunes     = 160
+	maxKeywordRunes  = 160
 	maxDocumentBytes = 2 << 20
 )
+
+var mappingKinds = [...]string{"company", "project", "person", "confidential", "other"}
 
 type mapping struct {
 	Kind        string `json:"kind"`
@@ -38,6 +40,19 @@ type mappingSnapshot struct {
 	Revision uint64    `json:"revision"`
 	Rules    []mapping `json:"rules"`
 	matcher  *redact.Matcher
+}
+
+func (snapshot *mappingSnapshot) automaticTokens(redactor *redact.Redactor) map[int]string {
+	tokens := map[int]string{}
+	for i, rule := range snapshot.Rules {
+		if rule.Replacement != "" {
+			continue
+		}
+		if token, ok := redactor.UsedReplacement(redact.Class(rule.Kind), rule.Original); ok {
+			tokens[i] = token
+		}
+	}
+	return tokens
 }
 
 type mappingStore struct {
@@ -86,7 +101,7 @@ func (store *mappingStore) update(revision uint64, rules []mapping) (*mappingSna
 		return nil, err
 	}
 	if err := writeAtomically(store.file, data); err != nil {
-		return nil, errors.New("マッピングを保存できませんでした。保存先の空き容量とアクセス権を確認してください。")
+		return nil, errors.New("ルールを保存できませんでした。保存先の空き容量とアクセス権を確認してください。")
 	}
 	snapshot := &mappingSnapshot{Revision: revision + 1, Rules: rules, matcher: matcher}
 	store.active.Store(snapshot)
@@ -95,28 +110,28 @@ func (store *mappingStore) update(revision uint64, rules []mapping) (*mappingSna
 
 func compileMappings(input []mapping) ([]mapping, *redact.Matcher, error) {
 	if len(input) > maxMappings {
-		return nil, nil, fmt.Errorf("登録できる名前は最大 %d 件です。", maxMappings)
+		return nil, nil, fmt.Errorf("登録できるキーワードは最大 %d 件です。", maxMappings)
 	}
 	rules := append([]mapping{}, input...)
-	names := make(map[string]struct{}, len(rules))
+	originals := make(map[string]struct{}, len(rules))
+	grouped := make(map[string]*redact.Dictionary, len(mappingKinds))
+	for _, kind := range mappingKinds {
+		grouped[kind] = &redact.Dictionary{Class: redact.Class(kind), Replacements: map[string]string{}}
+	}
 	for i := range rules {
 		rule := &rules[i]
 		rule.Original = strings.TrimSpace(rule.Original)
 		rule.Replacement = strings.TrimSpace(rule.Replacement)
-		if rule.Kind != "company" && rule.Kind != "project" {
-			return nil, nil, fmt.Errorf("%d 件目の種類を企業名または案件名にしてください。", i+1)
+		if _, ok := grouped[rule.Kind]; !ok {
+			return nil, nil, fmt.Errorf("%d 件目の種類が無効です。", i+1)
 		}
-		if rule.Original == "" || !validName(rule.Original) || !validName(rule.Replacement) {
-			return nil, nil, fmt.Errorf("%d 件目の名前を確認してください。各入力は %d 文字以内です。", i+1, maxNameRunes)
+		if rule.Original == "" || !validKeyword(rule.Original) || !validKeyword(rule.Replacement) {
+			return nil, nil, fmt.Errorf("%d 件目のキーワードと置換後の表記を確認してください。各入力は %d 文字以内です。", i+1, maxKeywordRunes)
 		}
-		if _, exists := names[rule.Original]; exists {
-			return nil, nil, fmt.Errorf("%d 件目の「伏せたい名前」が重複しています。", i+1)
+		if _, exists := originals[rule.Original]; exists {
+			return nil, nil, fmt.Errorf("%d 件目のマスキング対象のキーワードが重複しています。", i+1)
 		}
-		names[rule.Original] = struct{}{}
-	}
-	grouped := map[string]*redact.Dictionary{
-		"company": {Class: "company", Replacements: map[string]string{}},
-		"project": {Class: "project", Replacements: map[string]string{}},
+		originals[rule.Original] = struct{}{}
 	}
 	for i, rule := range rules {
 		dictionary := grouped[rule.Kind]
@@ -124,9 +139,9 @@ func compileMappings(input []mapping) ([]mapping, *redact.Matcher, error) {
 		if rule.Replacement == "" {
 			continue
 		}
-		for original := range names {
+		for original := range originals {
 			if strings.Contains(rule.Replacement, original) {
-				return nil, nil, fmt.Errorf("%d 件目の置換後の名前に、伏せたい名前が含まれています。", i+1)
+				return nil, nil, fmt.Errorf("%d 件目の置換後の表記に、マスキング対象のキーワードが含まれています。", i+1)
 			}
 		}
 		dictionary.Replacements[rule.Original] = rule.Replacement
@@ -135,36 +150,36 @@ func compileMappings(input []mapping) ([]mapping, *redact.Matcher, error) {
 		return rules, nil, nil
 	}
 	matcher := &redact.Matcher{}
-	for _, kind := range []string{"company", "project"} {
+	for _, kind := range mappingKinds {
 		dictionary := grouped[kind]
 		if len(dictionary.Entries) == 0 {
 			continue
 		}
 		if err := matcher.AddDictionary(*dictionary); err != nil {
-			return nil, nil, errors.New("マッピングを適用できませんでした。")
+			return nil, nil, errors.New("マスキングルールを適用できませんでした。")
 		}
 	}
 	return rules, matcher, nil
 }
 
-func validName(name string) bool {
-	return utf8.ValidString(name) && utf8.RuneCountInString(name) <= maxNameRunes &&
-		!strings.ContainsFunc(name, unicode.IsControl)
+func validKeyword(text string) bool {
+	return utf8.ValidString(text) && utf8.RuneCountInString(text) <= maxKeywordRunes &&
+		!strings.ContainsFunc(text, unicode.IsControl)
 }
 
 func parseDocument(body io.Reader) (mappingDocument, error) {
 	data, err := io.ReadAll(io.LimitReader(body, maxDocumentBytes+1))
 	if err != nil || len(data) > maxDocumentBytes || !utf8.Valid(data) {
-		return mappingDocument{}, errors.New("UTF-8 のマッピングファイルを読み込めませんでした。")
+		return mappingDocument{}, errors.New("UTF-8 の JSON ファイルを読み込めませんでした。")
 	}
 	var doc mappingDocument
 	decoder := json.NewDecoder(strings.NewReader(strings.TrimPrefix(string(data), "\uFEFF")))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&doc); err != nil || decoder.Decode(new(any)) != io.EOF || doc.Version != 1 || doc.Rules == nil {
-		return mappingDocument{}, errors.New("マッピングファイルの形式を確認してください。")
+		return mappingDocument{}, errors.New("マスキングルールの JSON 形式を確認してください。")
 	}
 	if len(doc.Rules) > maxMappings {
-		return mappingDocument{}, fmt.Errorf("取り込める名前は最大 %d 件です。", maxMappings)
+		return mappingDocument{}, fmt.Errorf("読み込めるキーワードは最大 %d 件です。", maxMappings)
 	}
 	return doc, nil
 }

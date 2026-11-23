@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>マスキングゲートウェイ</title>
+  <title>MaskLane</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
 </head>
@@ -11,28 +12,22 @@
   <header class="masthead">
     <div class="shell header-inner">
       <span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>
-      <div>
-        <h1>マスキングゲートウェイ</h1>
-        <p>Kiro IDE の送信前マスキング</p>
-      </div>
+      <h1>MaskLane</h1>
     </div>
   </header>
-  <main class="shell">
+  <main class="shell dashboard">
     <p id="banner" class="notice error" role="alert" hidden></p>
-    <section class="card" aria-labelledby="status-title">
-      <div class="section-heading">
-        <h2 id="status-title">動作状況</h2>
-        <div class="pill" id="process-state"><span aria-hidden="true"></span><span>確認中</span></div>
+    <section id="connection" class="connection" aria-label="Kiro の接続状況" data-state="waiting">
+      <div class="traces" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="recent">
+        <span class="status-mark" aria-hidden="true"></span>
+        <p id="recent-status" class="status-title" role="status">動作状況を確認中</p>
+        <p class="muted" id="recent-detail" hidden></p>
       </div>
-      <div class="status-content">
-        <div>
-          <p id="recent-status" class="status-title" role="status">動作状況を読み込んでいます</p>
-          <p class="muted" id="recent-detail"></p>
-        </div>
-        <div class="proxy-control">
-          <div><span class="muted">Kiro のプロキシ</span><code id="proxy-address">–</code></div>
-          <button id="copy-address" class="secondary compact" type="button" disabled>コピー</button>
-        </div>
+      <div class="proxy-control">
+        <p class="muted">Kiro のプロキシ</p>
+        <code id="proxy-address">–</code>
+        <button id="copy-address" class="secondary compact" type="button" disabled>コピー</button>
       </div>
       <details id="history" hidden>
         <summary>最近の通信</summary>
@@ -40,58 +35,84 @@
       </details>
     </section>
 
-    <section class="card mapping-card" aria-labelledby="mappings-title">
-      <div class="section-heading mapping-heading">
-        <div><h2 id="mappings-title">マッピング</h2><p class="muted">AI に送る前に伏せたい名前を登録します。</p></div>
-        <button id="add" type="button" disabled>名前を登録</button>
-      </div>
-      <div class="table-scroll">
+    <div class="workspace">
+      <section aria-labelledby="mappings-title">
+        <div class="section-heading">
+          <h2 id="mappings-title">マスキングルール</h2>
+          <button id="add" type="button" aria-controls="editor" disabled>キーワードを追加</button>
+        </div>
         <table>
           <thead><tr>
             <th scope="col" class="select-cell"><input id="all" type="checkbox" aria-label="すべて選択" disabled></th>
             <th scope="col">種類</th>
-            <th scope="col">伏せたい名前</th>
-            <th scope="col">置換後の名前</th>
+            <th scope="col">マスキング対象のキーワード</th>
+            <th scope="col">
+              置換後の表記
+              <span id="sent-comparison" class="comparison" hidden aria-live="polite"></span>
+              <button id="latest-comparison" class="quiet compact" type="button" hidden>直近に戻る</button>
+            </th>
             <th scope="col"><span class="sr-only">操作</span></th>
           </tr></thead>
           <tbody id="mappings"></tbody>
         </table>
-      </div>
-      <p id="empty" class="empty">登録した名前はここに表示されます。</p>
-      <div class="table-footer">
-        <p class="muted" id="selection">0 件選択</p>
-        <div class="actions">
-          <input id="import-file" type="file" accept=".json,application/json" hidden>
-          <button id="import" class="secondary" type="button" disabled>インポート</button>
-          <button id="export" class="secondary" type="button" disabled>エクスポート</button>
+        <p id="empty" class="empty" hidden>登録済みのキーワードはありません。</p>
+        <div class="table-footer">
+          <p class="muted" id="selection" hidden></p>
+          <div class="actions">
+            <input id="import-file" type="file" accept=".json,application/json" hidden>
+            <button id="import" class="secondary" type="button" disabled>JSONを読み込む</button>
+            <button id="export" class="secondary" type="button" aria-describedby="export-detail" disabled>選択分を書き出す</button>
+          </div>
+          <p id="export-detail" class="muted" hidden>書き出すJSONにはマスキング対象のキーワードの原文が含まれます。</p>
         </div>
-      </div>
-      <p class="footnote muted">エクスポートするファイルには、伏せたい名前の原文が含まれます。</p>
-    </section>
-    <p id="feedback" class="notice" role="status" hidden></p>
-  </main>
+      </section>
 
-  <dialog id="edit-dialog">
-    <form id="edit-form">
-      <h2 id="edit-title">名前を登録</h2>
-      <label for="kind">種類</label>
-      <select id="kind"><option value="company">企業名</option><option value="project">案件名</option></select>
-      <label for="original">伏せたい名前</label>
-      <input id="original" type="text" maxlength="320" required autocomplete="off" spellcheck="false">
-      <label for="replacement">置換後の名前 <span class="muted">任意</span></label>
-      <input id="replacement" type="text" maxlength="320" autocomplete="off" spellcheck="false">
-      <p class="muted form-hint">空欄の場合は標準のプレースホルダーを使います。</p>
-      <p class="notice error" id="edit-error" role="alert" hidden></p>
-      <div class="actions dialog-actions">
-        <button id="edit-cancel" class="secondary" type="button">キャンセル</button>
-        <button id="edit-save" type="submit">保存</button>
-      </div>
-    </form>
-  </dialog>
+      <section id="editor" class="editor" aria-labelledby="edit-title" hidden>
+        <h2 id="edit-title">キーワードを追加</h2>
+        <form id="edit-form">
+          <div class="fields">
+            <div class="field">
+              <label for="kind">種類</label>
+              <select id="kind">
+                <option value="company">企業名</option>
+                <option value="project">案件名</option>
+                <option value="person">個人名</option>
+                <option value="confidential">社外秘</option>
+                <option value="other">その他</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="original">マスキング対象のキーワード</label>
+              <input id="original" type="text" maxlength="320" required autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="replacement">置換後の表記 <span class="muted">任意</span></label>
+              <input id="replacement" type="text" maxlength="320" autocomplete="off" spellcheck="false" aria-describedby="preview-label">
+            </div>
+          </div>
+          <div class="replacement-preview">
+            <span id="preview-label">空欄時の置換例</span>
+            <output for="kind original replacement">
+              <span id="preview-original">入力したキーワード</span>
+              <span aria-hidden="true">→</span>
+              <code id="preview-result"></code>
+            </output>
+            <small id="preview-hint">末尾の番号は送信内容によって変わります。</small>
+          </div>
+          <p class="notice error" id="edit-error" role="alert" hidden></p>
+          <div class="actions dialog-actions">
+            <button id="edit-cancel" class="secondary" type="button">キャンセル</button>
+            <button id="edit-save" type="submit">キーワードを登録</button>
+          </div>
+        </form>
+      </section>
+      <p id="feedback" class="notice" role="status" hidden></p>
+    </div>
+  </main>
 
   <dialog id="remove-dialog">
     <form id="remove-form">
-      <h2>マッピングを削除</h2>
+      <h2>キーワードを削除</h2>
       <p id="remove-description"></p>
       <p class="notice error" id="remove-error" role="alert" hidden></p>
       <div class="actions dialog-actions">
@@ -103,7 +124,7 @@
 
   <dialog id="import-dialog">
     <form id="import-form">
-      <h2>インポートの確認</h2>
+      <h2>読み込むルールの確認</h2>
       <p id="import-summary"></p>
       <ul id="import-plan" class="import-plan"></ul>
       <p class="notice error" id="import-error" role="alert" hidden></p>

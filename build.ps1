@@ -6,10 +6,12 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $work = Join-Path $root '.build'
 $dist = Join-Path $root 'dist'
+$exeName = 'MaskLane.exe'
 $sourceRevision = '556048c1c18d84f7d61d28f686220178a4ff2c4d'
-$source = Join-Path $work "pipelock-$sourceRevision"
+$sourceRelative = ".build/pipelock-$sourceRevision"
+$source = Join-Path $root $sourceRelative
 $go = Join-Path $work 'go/bin/go.exe'
-$patch = Join-Path $root 'patches/pipelock-3.8.0.patch'
+$patches = 'pipelock-3.8.0.patch', 'sent-replacements.patch' | ForEach-Object { Join-Path $root "patches/$_" }
 $overlay = Join-Path $root 'overlay'
 
 function Get-VerifiedArchive($Uri, $Archive, $Hash) {
@@ -46,12 +48,14 @@ if (-not (Test-Path -LiteralPath $go)) {
     Expand-VerifiedArchive $goZip
 }
 
-& git -C $source apply --reverse --check $patch 2>$null
-if ($LASTEXITCODE -ne 0) {
-    & git -C $source apply --check $patch
-    if ($LASTEXITCODE -ne 0) { throw 'The pinned Pipelock source does not match the patch.' }
-    & git -C $source apply $patch
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the Pipelock patch.' }
+foreach ($patch in $patches) {
+    & git -C $root apply "--directory=$sourceRelative" --reverse --check $patch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        & git -C $root apply "--directory=$sourceRelative" --check $patch
+        if ($LASTEXITCODE -ne 0) { throw "The pinned Pipelock source does not match $patch." }
+        & git -C $root apply "--directory=$sourceRelative" $patch
+        if ($LASTEXITCODE -ne 0) { throw "Failed to apply $patch." }
+    }
 }
 
 Get-ChildItem -LiteralPath $overlay -Recurse -File | ForEach-Object {
@@ -83,7 +87,7 @@ try {
         & $go test ./internal/proxy -run '^TestMaskingGateway(TLS|Intercept)$'
         if ($LASTEXITCODE -ne 0) { throw 'Proxy tests failed.' }
     }
-    $exe = Join-Path $dist 'MaskingGateway.exe'
+    $exe = Join-Path $dist $exeName
     & $go build -trimpath -buildvcs=false -ldflags '-s -w' -o $exe ./cmd/masking-gateway
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 } finally {
@@ -98,13 +102,13 @@ Copy-Item -LiteralPath (Join-Path $source 'NOTICE') -Destination (Join-Path $dis
 Get-ChildItem -LiteralPath (Join-Path $root 'pilot') -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $dist -Force
 }
-$contents = 'MaskingGateway.exe', 'PIPELOCK-LICENSE.txt', 'PIPELOCK-NOTICE.txt' | ForEach-Object {
+$contents = $exeName, 'PIPELOCK-LICENSE.txt', 'PIPELOCK-NOTICE.txt' | ForEach-Object {
     Join-Path $dist $_
 }
 $contents += Get-ChildItem -LiteralPath (Join-Path $root 'pilot') -File | ForEach-Object {
     Join-Path $dist $_.Name
 }
-$zip = Join-Path $dist 'MaskingGateway-Windows-x64.zip'
+$zip = Join-Path $dist 'MaskLane-Windows-x64.zip'
 Compress-Archive -LiteralPath $contents -DestinationPath $zip -Force
 Write-Host $exe
 Write-Host $zip

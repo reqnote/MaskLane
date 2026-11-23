@@ -15,27 +15,38 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/proxy"
 )
 
-//go:embed web/index.html web/app.css web/app.js
+//go:embed web/index.html web/app.css web/app.js web/favicon.png
 var assets embed.FS
 
 type activity struct {
-	At      time.Time `json:"at"`
-	State   string    `json:"state"`
-	Reason  string    `json:"reason,omitempty"`
-	Company int       `json:"company"`
-	Project int       `json:"project"`
+	ID              uint64         `json:"id"`
+	At              time.Time      `json:"at"`
+	State           string         `json:"state"`
+	Reason          string         `json:"reason,omitempty"`
+	Company         int            `json:"company"`
+	Project         int            `json:"project"`
+	Other           int            `json:"other"`
+	Person          int            `json:"person"`
+	Confidential    int            `json:"confidential"`
+	MappingRevision uint64         `json:"mappingRevision,omitempty"`
+	Automatic       map[int]string `json:"automatic,omitempty"`
 }
 
 type activityLog struct {
-	mu   sync.Mutex
-	rows []activity
+	mu     sync.Mutex
+	nextID uint64
+	rows   []activity
 }
 
 func (log *activityLog) add(decision proxy.MaskingDecision) {
 	log.mu.Lock()
 	defer log.mu.Unlock()
+	log.nextID++
 	log.rows = append(log.rows, activity{
-		At: decision.At, State: decision.State, Reason: decision.Reason, Company: decision.Company, Project: decision.Project,
+		ID: log.nextID, At: decision.At, State: decision.State, Reason: decision.Reason,
+		Company: decision.Company, Project: decision.Project, Other: decision.Other,
+		Person: decision.Person, Confidential: decision.Confidential,
+		MappingRevision: decision.MappingRevision, Automatic: decision.Automatic,
 	})
 	if len(log.rows) > 20 {
 		log.rows = slices.Clone(log.rows[len(log.rows)-20:])
@@ -55,6 +66,7 @@ func newDashboard(host, token, proxyAddress string, store *mappingStore, log *ac
 	mux.HandleFunc("GET /{$}", serveAsset("web/index.html", "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /app.css", serveAsset("web/app.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", serveAsset("web/app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /favicon.png", serveAsset("web/favicon.png", "image/png"))
 
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
 		snapshot := store.active.Load()
@@ -73,7 +85,7 @@ func newDashboard(host, token, proxyAddress string, store *mappingStore, log *ac
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxDocumentBytes))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil || decoder.Decode(new(any)) != io.EOF || input.Rules == nil {
-			respondError(w, http.StatusBadRequest, errors.New("マッピングの形式を確認してください。"))
+			respondError(w, http.StatusBadRequest, errors.New("マスキングルールの形式を確認してください。"))
 			return
 		}
 		snapshot, err := store.update(input.Revision, input.Rules)

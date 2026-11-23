@@ -23,7 +23,6 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/config"
 	"github.com/luckyPipewrench/pipelock/internal/metrics"
 	"github.com/luckyPipewrench/pipelock/internal/proxy"
-	"github.com/luckyPipewrench/pipelock/internal/redact"
 	"github.com/luckyPipewrench/pipelock/internal/scanner"
 	"github.com/luckyPipewrench/pipelock/internal/signing"
 )
@@ -63,6 +62,7 @@ func run() error {
 		if local == "" {
 			return errors.New("Windows のローカルアプリデータフォルダーを取得できませんでした。")
 		}
+		// Keep the existing mappings and trusted CA after the product rename.
 		*dataDir = filepath.Join(local, "MaskingGateway")
 	}
 	home, err := filepath.Abs(*dataDir)
@@ -97,7 +97,7 @@ func ensureCA(dir string) (string, string, error) {
 	_, certErr := os.Stat(certPath)
 	_, keyErr := os.Stat(keyPath)
 	if errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist) {
-		cert, key, _, err := certgen.GenerateCA("Masking Gateway", 365*24*time.Hour)
+		cert, key, _, err := certgen.GenerateCA("MaskLane", 365*24*time.Hour)
 		if err != nil {
 			return "", "", err
 		}
@@ -119,7 +119,7 @@ func ensureCA(dir string) (string, string, error) {
 func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, openBrowser bool) error {
 	store, err := openMappings(filepath.Join(home, "mappings.json"))
 	if err != nil {
-		return fmt.Errorf("保存済みのマッピングを読み込めませんでした。 %w", err)
+		return fmt.Errorf("保存済みのマスキングルールを読み込めませんでした。 %w", err)
 	}
 	// Bind before opening the dashboard. A second instance on the same port
 	// cannot offer an editor backed by an inactive proxy.
@@ -159,8 +159,11 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 	defer logger.Close()
 	status := &activityLog{}
 	gateway, err := proxy.New(cfg, logger, sc, metrics.New(), proxy.WithMaskingGateway(proxy.MaskingGateway{
-		Matcher: func() *redact.Matcher { return store.active.Load().matcher },
-		Record:  status.add,
+		Rules: func() proxy.MaskingRules {
+			snapshot := store.active.Load()
+			return proxy.MaskingRules{Matcher: snapshot.matcher, Revision: snapshot.Revision, AutomaticTokens: snapshot.automaticTokens}
+		},
+		Record: status.add,
 	}))
 	if err != nil {
 		sc.Close()
@@ -177,7 +180,7 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 	go func() { errorsCh <- uiServer.Serve(uiListener) }()
 
 	url := "http://" + uiListener.Addr().String() + "/#" + token
-	fmt.Println("Masking Gateway")
+	fmt.Println("MaskLane")
 	fmt.Println("Dashboard:", url)
 	fmt.Println("Kiro proxy:", "http://"+proxyAddress)
 	fmt.Println("CA:", certPath)

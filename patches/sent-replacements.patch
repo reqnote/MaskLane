@@ -1,0 +1,37 @@
+diff --git a/internal/proxy/bodyscan.go b/internal/proxy/bodyscan.go
+--- a/internal/proxy/bodyscan.go
++++ b/internal/proxy/bodyscan.go
+@@ -775,6 +775,7 @@ type BodyScanRequest struct {
+ 	// profile. Nil disables redaction for this request. Callers construct
+ 	// this once per config reload via redact.Config.BuildMatcher and reuse
+ 	// it across requests.
+ 	RedactMatcher *redact.Matcher
++	maskingRequest *maskingRequest
+ 	// RedactLimits caps redaction-specific ceilings independently of the
+ 	// body scan's MaxBytes. Zero values fall through to redact package
+@@ -2104,11 +2105,13 @@ func applyRedaction(buf []byte, req BodyScanRequest) ([]byte, *redact.Report, error) {
+ func applyRedaction(buf []byte, req BodyScanRequest) ([]byte, *redact.Report, error) {
+ 	if bodyIsJSONForRedaction(buf, req.ContentType) {
+-		rewritten, report, err := redact.RewriteRequestJSON(buf, req.RedactMatcher, redact.NewRedactor(), req.RedactLimits, redact.RequestMetadata{
++		redactor := redact.NewRedactor()
++		rewritten, report, err := redact.RewriteRequestJSON(buf, req.RedactMatcher, redactor, req.RedactLimits, redact.RequestMetadata{
+ 			Host: req.Host,
+ 			Path: req.Path,
+ 		}, req.RedactProviderRegistry)
+ 		if err != nil {
+ 			return nil, nil, err
+ 		}
++		req.maskingRequest.captureTokens(redactor)
+ 		return rewritten, report, nil
+ 	}
+diff --git a/internal/proxy/intercept.go b/internal/proxy/intercept.go
+--- a/internal/proxy/intercept.go
++++ b/internal/proxy/intercept.go
+@@ -1355,6 +1355,7 @@ func newInterceptHandler(
+ 				DisablePatterns:  ic.Config.RequestBodyScanning.DisablePatterns,
+ 				PatternActions:   ic.Config.RequestBodyScanning.PatternActions,
+ 				AudienceSurface:  "body",
++				maskingRequest:   gatewayRequest,
+ 				OnDroppedDLP: func(match scanner.TextDLPMatch, reason string) {
+ 					if ic.Logger != nil {
+ 						ic.Logger.LogDLPDropped(actx, match.PatternName, match.Severity, "body", reason)

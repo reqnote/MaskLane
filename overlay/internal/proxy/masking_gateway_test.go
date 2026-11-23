@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,8 +32,8 @@ func TestMaskingGatewayIntercept(t *testing.T) {
 	var matcher *redact.Matcher
 	var results []MaskingDecision
 	WithMaskingGateway(MaskingGateway{
-		Matcher: func() *redact.Matcher { return matcher },
-		Record:  func(result MaskingDecision) { results = append(results, result) },
+		Rules:  func() MaskingRules { return MaskingRules{Matcher: matcher} },
+		Record: func(result MaskingDecision) { results = append(results, result) },
 	})(p)
 	var upstream []string
 	upstreamError := false
@@ -110,10 +111,26 @@ func TestMaskingGatewayTLS(t *testing.T) {
 	if err := matcher.AddDictionary(redact.Dictionary{Class: "company", Entries: []string{"青葉商事"}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := matcher.AddDictionary(redact.Dictionary{Class: "other", Entries: []string{"ALPHA-2048"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := matcher.AddDictionary(redact.Dictionary{Class: "person", Entries: []string{"港野ミナ", "森丘リオ"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := matcher.AddDictionary(redact.Dictionary{Class: "confidential", Entries: []string{"未発表計画A"}}); err != nil {
+		t.Fatal(err)
+	}
 	decisions := make(chan MaskingDecision, 1)
 	WithMaskingGateway(MaskingGateway{
-		Matcher: func() *redact.Matcher { return matcher },
-		Record:  func(decision MaskingDecision) { decisions <- decision },
+		Rules: func() MaskingRules {
+			return MaskingRules{Matcher: matcher, Revision: 7, AutomaticTokens: func(r *redact.Redactor) map[int]string {
+				first, _ := r.UsedReplacement("person", "港野ミナ")
+				second, _ := r.UsedReplacement("person", "森丘リオ")
+				secret, _ := r.UsedReplacement("confidential", "未発表計画A")
+				return map[int]string{1: first, 2: second, 3: secret}
+			}}
+		},
+		Record: func(decision MaskingDecision) { decisions <- decision },
 	})(p)
 	forwarded := make(chan string, 1)
 	upstream := maskingRoundTripper(func(r *http.Request) (*http.Response, error) {
@@ -148,7 +165,8 @@ func TestMaskingGatewayTLS(t *testing.T) {
 	if err := tlsClient.HandshakeContext(ctx); err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+host+"/chat", strings.NewReader(`{"input":"青葉商事"}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+host+"/chat",
+		strings.NewReader(`{"input":"青葉商事のALPHA-2048とALPHA-2048。森丘リオと港野ミナの未発表計画A"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +185,7 @@ func TestMaskingGatewayTLS(t *testing.T) {
 	}
 	select {
 	case value := <-forwarded:
-		if value != `{"input":"<pl:company:1>"}` {
+		if value != `{"input":"<pl:company:1>の<pl:other:1>と<pl:other:1>。<pl:person:1>と<pl:person:2>の<pl:confidential:1>"}` {
 			t.Fatalf("unexpected TLS forwarded body: %q", value)
 		}
 	case <-ctx.Done():
@@ -175,7 +193,10 @@ func TestMaskingGatewayTLS(t *testing.T) {
 	}
 	select {
 	case decision := <-decisions:
-		if decision.State != "sent" || decision.Company != 1 {
+		wantTokens := map[int]string{1: "<pl:person:2>", 2: "<pl:person:1>", 3: "<pl:confidential:1>"}
+		if decision.State != "sent" || decision.Company != 1 || decision.Other != 1 ||
+			decision.Person != 2 || decision.Confidential != 1 || decision.MappingRevision != 7 ||
+			!maps.Equal(decision.Automatic, wantTokens) {
 			t.Fatalf("unexpected TLS decision: %+v", decision)
 		}
 	case <-ctx.Done():
