@@ -1,0 +1,223 @@
+diff --git a/internal/redact/matcher.go b/internal/redact/matcher.go
+index e35dc5a..83851b0 100644
+--- a/internal/redact/matcher.go
++++ b/internal/redact/matcher.go
+@@ -30,10 +30,11 @@ var classNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+ // are byte offsets into the scalar (half-open, [Start, End)). Original is
+ // the matched substring.
+ type Match struct {
+-	Class    Class
+-	Start    int
+-	End      int
+-	Original string
++	Class       Class
++	Start       int
++	End         int
++	Original    string
++	Replacement string // optional explicit alias for a dictionary match
+ }
+ 
+ // Matcher scans a string for redactable spans using a fixed set of class
+@@ -57,9 +58,10 @@ type Matcher struct {
+ // dictionary hits can dominate or defer to regex hits depending on operator
+ // preference.
+ type dictPattern struct {
+-	class    Class
+-	pattern  *regexp.Regexp
+-	priority int
++	class        Class
++	pattern      *regexp.Regexp
++	priority     int
++	replacements map[string]string
+ }
+ 
+ // NewDefaultMatcher returns a Matcher configured with the shipped class
+@@ -81,6 +83,9 @@ type Dictionary struct {
+ 	// Entries is the literal set of strings to match. Empty entries are
+ 	// ignored silently.
+ 	Entries []string
++	// Replacements supplies optional exact-match aliases for these entries.
++	// Explicit aliases require case-sensitive matching.
++	Replacements map[string]string
+ 	// CaseInsensitive toggles case-insensitive matching via the `(?i)`
+ 	// regex flag. Defaults to false.
+ 	CaseInsensitive bool
+@@ -125,6 +130,17 @@ func (m *Matcher) AddDictionary(d Dictionary) error {
+ 		return errEmptyDictionary
+ 	}
+ 
++	if d.CaseInsensitive && len(d.Replacements) != 0 {
++		return errors.New("redact: explicit replacements require case-sensitive matches")
++	}
++	replacements := make(map[string]string, len(d.Replacements))
++	for original, replacement := range d.Replacements {
++		if _, ok := seen[original]; !ok || replacement == original {
++			return errors.New("redact: invalid explicit replacement")
++		}
++		replacements[original] = replacement
++	}
++
+ 	// Longest literals first prevents prefix entries from shadowing a longer
+ 	// secret in the same alternation (e.g. "dc01" before "dc01.corp.local").
+ 	sort.SliceStable(pruned, func(i, j int) bool {
+@@ -151,9 +167,10 @@ func (m *Matcher) AddDictionary(d Dictionary) error {
+ 		return err
+ 	}
+ 	m.dicts = append(m.dicts, dictPattern{
+-		class:    d.Class,
+-		pattern:  re,
+-		priority: d.Priority,
++		class:        d.Class,
++		pattern:      re,
++		priority:     d.Priority,
++		replacements: replacements,
+ 	})
+ 	return nil
+ }
+@@ -197,10 +214,11 @@ func (m *Matcher) scanViews(s, cardView string) []Match {
+ 	for _, dp := range m.dicts {
+ 		for _, loc := range dp.pattern.FindAllStringIndex(s, -1) {
+ 			raw = append(raw, Match{
+-				Class:    dp.class,
+-				Start:    loc[0],
+-				End:      loc[1],
+-				Original: s[loc[0]:loc[1]],
++				Class:       dp.class,
++				Start:       loc[0],
++				End:         loc[1],
++				Original:    s[loc[0]:loc[1]],
++				Replacement: dp.replacements[s[loc[0]:loc[1]]],
+ 			})
+ 		}
+ 	}
+diff --git a/internal/redact/redact.go b/internal/redact/redact.go
+index d7da7b0..913474b 100644
+--- a/internal/redact/redact.go
++++ b/internal/redact/redact.go
+@@ -110,6 +110,10 @@ func NewRedactor() *Redactor {
+ // placeholder. AddDictionary rejects malformed class names up front; this
+ // defensive check catches any direct caller that bypasses that API.
+ func (r *Redactor) Placeholder(class Class, original string) string {
++	return r.replacement(class, original, "")
++}
++
++func (r *Redactor) replacement(class Class, original, value string) string {
+ 	if !safePlaceholderClass(class) {
+ 		class = Class("invalid")
+ 	}
+@@ -122,10 +126,12 @@ func (r *Redactor) Placeholder(class Class, original string) string {
+ 		return existing
+ 	}
+ 	r.counters[class]++
+-	ph := fmt.Sprintf("<pl:%s:%d>", string(class), r.counters[class])
+-	bucket[original] = ph
++	if value == "" {
++		value = fmt.Sprintf("<pl:%s:%d>", string(class), r.counters[class])
++	}
++	bucket[original] = value
+ 	r.total++
+-	return ph
++	return value
+ }
+ 
+ // safePlaceholderClass reports whether c matches the placeholder-safe
+diff --git a/internal/redact/rewrite.go b/internal/redact/rewrite.go
+index ea48f1b..5ce4d7e 100644
+--- a/internal/redact/rewrite.go
++++ b/internal/redact/rewrite.go
+@@ -23,7 +23,7 @@ func RewriteString(s string, matches []Match, r *Redactor) string {
+ 			continue
+ 		}
+ 		b.WriteString(s[cursor:m.Start])
+-		b.WriteString(r.Placeholder(m.Class, m.Original))
++		b.WriteString(r.replacement(m.Class, m.Original, m.Replacement))
+ 		cursor = m.End
+ 	}
+ 	b.WriteString(s[cursor:])
+diff --git a/internal/proxy/proxy.go b/internal/proxy/proxy.go
+index 4b800d8..3ab0447 100644
+--- a/internal/proxy/proxy.go
++++ b/internal/proxy/proxy.go
+@@ -663,6 +663,7 @@ type Proxy struct {
+ 	approver             *hitl.Approver
+ 	a2aCardBaseline      *mcp.CardBaseline // Agent Card drift detection across requests
+ 	captureObs           capture.CaptureObserver
++	maskingGateway       *MaskingGateway
+ 	sizeExemptScanBudget sizeExemptScanBudget
+ 	recorder             *recorder.Recorder                    // flight recorder for tamper-evident evidence (nil = disabled)
+ 	session              string                                // recorder session this process records under; "proxy" when unset (see WithSession)
+diff --git a/internal/proxy/intercept.go b/internal/proxy/intercept.go
+index f49088f..1405dc2 100644
+--- a/internal/proxy/intercept.go
++++ b/internal/proxy/intercept.go
+@@ -614,6 +614,18 @@ func newInterceptHandler(
+ 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		requestContext := *ic
+ 		ic := &requestContext
++		var interceptRedactionReport *redact.Report
++		var gatewayRequest *maskingRequest
++		if ic.Proxy != nil && ic.Proxy.maskingGateway != nil {
++			gatewayRequest = ic.Proxy.maskingGateway.begin(r)
++			if gatewayRequest != nil {
++				defer func() { gatewayRequest.finish(interceptRedactionReport) }()
++				if gatewayRequest.matcher == nil || r.Header.Get("Upgrade") != "" || r.Method == http.MethodConnect {
++					http.Error(w, "Masking gateway could not inspect this request", http.StatusForbidden)
++					return
++				}
++			}
++		}
+ 		w = ic.Proxy.withAdaptiveRefusal(w, adaptiveRefusalOptions{config: ic.Config, agent: ic.Agent, clientIP: ic.ClientIP, auth: ic.ActorAuth, host: func() string { return ic.TargetHost }, transport: "intercept", level: func() int { return interceptEscalationLevel(ic) }})
+ 		if ic.Proxy != nil {
+ 			ic.receiptShard = ic.Proxy.admitReceiptShard()
+@@ -800,7 +812,6 @@ func newInterceptHandler(
+ 		// warn/strip findings do not contribute to score decay.
+ 		hasFinding := false
+ 		interceptHeaderWarningPattern := ""
+-		var interceptRedactionReport *redact.Report
+ 		var interceptGate ContractGateOutput
+ 		withInterceptRedaction := func(opts receipt.EmitOpts) receipt.EmitOpts {
+ 			opts.RedactionProfile = ic.Config.Redaction.DefaultProfile
+@@ -1367,6 +1378,10 @@ func newInterceptHandler(
+ 				bodyReq.ContentEntropyEnabled = false
+ 			}
+ 			applyBodyScanRedaction(&bodyReq, redaction)
++			if gatewayRequest != nil {
++				bodyReq.RedactMatcher = gatewayRequest.matcher
++				bodyReq.RedactionRequired = true
++			}
+ 			bodyBytes, result := scanRequestBody(r.Context(), bodyReq)
+ 			if result.CredentialAudienceReceiptErr != nil {
+ 				blockedErr := newCredentialAudienceReceiptBlockedRequest(result.CredentialAudienceReceiptErr)
+@@ -2186,6 +2201,11 @@ func newInterceptHandler(
+ 			}
+ 		}
+ 
++		if gatewayRequest != nil && (interceptRedactionReport == nil || !interceptRedactionReport.Applied) {
++			http.Error(w, "Masking gateway could not inspect this request", http.StatusForbidden)
++			return
++		}
++
+ 		// Record what this request sends before it leaves, so no response
+ 		// can mint a value the session itself supplied.
+ 		recordIssuerRequestSent(ic, r, interceptBodyBytes)
+@@ -2215,6 +2235,9 @@ func newInterceptHandler(
+ 		if seconds := ic.Config.FetchProxy.TimeoutSeconds; seconds > 0 {
+ 			interceptUpstream = &upstreamBodyStallTransport{base: upstream, stall: time.Duration(seconds) * time.Second}
+ 		}
++		if gatewayRequest != nil {
++			gatewayRequest.attempted = true
++		}
+ 		resp, err := interceptUpstream.RoundTrip(r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
+ 			GotConn: func(httptrace.GotConnInfo) {
+ 				connAt.CompareAndSwap(0, int64(time.Since(base))+1)
+@@ -2233,6 +2256,10 @@ func newInterceptHandler(
+ 		// the request was sent; the wait then starts at connection ready.
+ 		start := wroteAt.Load()
+ 		if err == nil {
++			if gatewayRequest != nil {
++				gatewayRequest.sent = true
++				gatewayRequest.finish(interceptRedactionReport)
++			}
+ 			reachedUpstream.Store(true)
+ 			if start == 0 {
+ 				start = connAt.Load()
