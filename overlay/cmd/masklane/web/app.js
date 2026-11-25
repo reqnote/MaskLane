@@ -1,4 +1,4 @@
-"use strict";
+import { maskText, restoreText } from "./restore.mjs";
 
 const get = (id) => document.getElementById(id);
 const labels = Array.from(get("kind").options, ({ value, textContent }) => [value, textContent]);
@@ -7,12 +7,13 @@ const formatter = new Intl.DateTimeFormat("ja-JP", {
   month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
 });
 const selected = new Set();
+const sessionKey = "masklane-session";
 const fragment = location.hash.slice(1);
 if (/^[a-f0-9]{64}$/.test(fragment)) {
-  sessionStorage.setItem("masking-gateway-session", fragment);
-  history.replaceState(null, "", location.pathname);
+  sessionStorage.setItem(sessionKey, fragment);
+  history.replaceState(null, "", location.pathname + location.search);
 }
-const session = sessionStorage.getItem("masking-gateway-session");
+const session = sessionStorage.getItem(sessionKey);
 let snapshot = { revision: 0, rules: [] };
 let draft = null;
 let removingIndex = -1;
@@ -20,6 +21,47 @@ let importPlan = null;
 let feedbackTimer = null;
 let activity = [];
 let comparedSendId = null;
+let restoreRevision = 0;
+let localAutomatic = null;
+let localNumbers = {};
+
+const menuLinks = document.querySelectorAll(".main-menu a");
+
+function showMenuPage() {
+  const view = new URLSearchParams(location.search).get("view");
+  const pageId = view === "management" || view === "usage" ? view : "text-tools";
+  let activeLink;
+  let moveFocus = false;
+  for (const link of menuLinks) {
+    const page = get(link.getAttribute("aria-controls"));
+    const active = page.id === pageId;
+    if (!active && page.contains(document.activeElement)) moveFocus = true;
+    page.hidden = !active;
+    if (active) {
+      link.setAttribute("aria-current", "page");
+      activeLink = link;
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  }
+  if (moveFocus) activeLink.focus();
+  if (view === "usage" && session && !get("kiro-launch-output").value) {
+    void loadKiroLaunchCommand();
+  }
+}
+
+for (const link of menuLinks) {
+  link.addEventListener("click", (event) => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    if (!link.hasAttribute("aria-current")) {
+      history.pushState(null, "", link.href);
+      showMenuPage();
+    }
+  });
+}
+window.addEventListener("popstate", showMenuPage);
+showMenuPage();
 
 async function api(route, options = {}) {
   const response = await fetch("/api/" + route, {
@@ -62,6 +104,7 @@ function stateText(event, matches) {
   }
   if (event.state === "unconfirmed") return "送信先から応答を確認できませんでした";
   if (event.reason === "no_mapping") return "キーワードが未登録のため、送信を停止しました";
+  if (event.reason === "body_too_large") return "送信本文が上限を超えたため、送信を停止しました";
   if (event.reason === "policy") return "検査で送信を停止しました";
   return "内容を確認できなかったため、送信を停止しました";
 }
@@ -85,6 +128,144 @@ function automaticToken(kind, number) {
 
 function canCompare(event) {
   return event.mappingRevision === snapshot.revision && Boolean(event.automatic);
+}
+
+const textTabs = Array.from(get("text-tool-tabs").querySelectorAll('[role="tab"]'));
+
+function selectTextTab(selectedTab) {
+  for (const tab of textTabs) {
+    const active = tab === selectedTab;
+    tab.tabIndex = active ? 0 : -1;
+    tab.setAttribute("aria-selected", String(active));
+    get(tab.getAttribute("aria-controls")).hidden = !active;
+  }
+}
+
+for (const [index, tab] of textTabs.entries()) {
+  tab.addEventListener("click", () => selectTextTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    let next;
+    switch (event.key) {
+      case "ArrowLeft": next = (index + textTabs.length - 1) % textTabs.length; break;
+      case "ArrowRight": next = (index + 1) % textTabs.length; break;
+      case "Home": next = 0; break;
+      case "End": next = textTabs.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    selectTextTab(textTabs[next]);
+    textTabs[next].focus();
+  });
+}
+
+function clearTextResult(tool) {
+  get(tool + "-output").value = "";
+  get(tool + "-result").hidden = true;
+  get(tool + "-status").textContent = "";
+  get(tool + "-run").disabled = !snapshot.revision || !get(tool + "-input").value;
+}
+
+function updateRestoreSources() {
+  const source = get("restore-source");
+  const selectedId = source.value;
+  const sends = activity.filter(canCompare);
+  if (restoreRevision !== snapshot.revision) {
+    localAutomatic = null;
+    clearTextResult("mask");
+    clearTextResult("restore");
+    restoreRevision = snapshot.revision;
+  }
+  source.length = 1;
+  if (localAutomatic) source.add(new Option("直前の簡易マスク", "local"));
+  for (const send of sends) {
+    source.add(new Option(dateText(send.at) + "（#" + send.id + "）", String(send.id)));
+  }
+  source.value = selectedId;
+  if (source.selectedIndex < 0) source.selectedIndex = 0;
+  get("restore-source-field").hidden = source.length === 1;
+  if (source.value !== selectedId) clearTextResult("restore");
+}
+
+get("mask-input").addEventListener("input", () => clearTextResult("mask"));
+get("mask-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  clearTextResult("mask");
+  if (!snapshot.rules.length) {
+    get("mask-status").textContent = "マスキングルールにキーワードを追加してください。";
+    return;
+  }
+  const result = maskText(get("mask-input").value, snapshot.rules, localNumbers);
+  if (!result.masked) {
+    get("mask-status").textContent = "登録済みのキーワードは見つかりませんでした。";
+    return;
+  }
+  localNumbers = result.numbers;
+  localAutomatic = Object.keys(result.automatic).length ? result.automatic : null;
+  if (get("restore-source").value === "local") clearTextResult("restore");
+  updateRestoreSources();
+  get("mask-output").value = result.text;
+  get("mask-result").hidden = false;
+  get("mask-copy").textContent = "結果をコピー";
+  get("mask-status").textContent = result.masked + " か所をマスクしました。";
+});
+
+get("mask-transfer").addEventListener("click", () => {
+  const input = get("restore-input");
+  selectTextTab(get("restore-tab"));
+  input.value = get("mask-output").value;
+  get("restore-source").value = localAutomatic ? "local" : "";
+  clearTextResult("restore");
+  input.focus();
+});
+
+get("restore-input").addEventListener("input", () => clearTextResult("restore"));
+get("restore-source").addEventListener("change", () => clearTextResult("restore"));
+get("restore-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const source = get("restore-source").value;
+  const automatic = source === "local" ? localAutomatic
+    : activity.find((item) => String(item.id) === source && canCompare(item))?.automatic;
+  const result = restoreText(get("restore-input").value, snapshot.rules, automatic);
+  get("restore-output").value = result.text;
+  get("restore-result").hidden = false;
+  get("restore-copy").textContent = "結果をコピー";
+  const messages = [result.restored ? result.restored + " か所を復元しました。" : "復元できる表記はありませんでした。"];
+  if (result.unknown) {
+    messages.push("対応を特定できない自動表記 " + result.unknown + " か所を残しました。");
+    if (!source) messages.push(get("restore-source-field").hidden
+      ? "現在のルールで照合できる履歴がありません。" : "対応する照合先を選んでください。");
+  }
+  if (result.ambiguous.length) messages.push("複数の元の語に対応する表記を残しました：" + result.ambiguous.join("、"));
+  get("restore-status").textContent = messages.join(" ");
+});
+
+async function copyTextResult(tool) {
+  const output = get(tool + "-output");
+  try {
+    await navigator.clipboard.writeText(output.value);
+    get(tool + "-copy").textContent = "コピーしました";
+  } catch {
+    output.focus();
+    output.select();
+    get(tool + "-status").textContent += " 選択した内容を手動でコピーしてください。";
+  }
+}
+
+get("mask-copy").addEventListener("click", () => copyTextResult("mask"));
+get("restore-copy").addEventListener("click", () => copyTextResult("restore"));
+get("kiro-launch-copy").addEventListener("click", () => copyTextResult("kiro-launch"));
+
+async function loadKiroLaunchCommand() {
+  const status = get("kiro-launch-status");
+  status.textContent = "コマンドを取得中";
+  try {
+    const { command } = await api("kiro-launch");
+    get("kiro-launch-output").value = command;
+    get("kiro-launch-copy").disabled = false;
+    status.textContent = "";
+  } catch (error) {
+    status.textContent = error.message;
+  }
 }
 
 function updateComparison() {
@@ -137,6 +318,7 @@ function renderActivity() {
     return item;
   }));
   updateComparison();
+  updateRestoreSources();
 }
 
 async function refreshStatus() {
@@ -414,6 +596,7 @@ get("copy-address").addEventListener("click", async () => {
 async function init() {
   if (!session) {
     showConnection("disconnected", "アプリの起動時に開く画面を使ってください。");
+    showMessage(get("banner"), "アプリの起動時に開く画面を使ってください。", true);
     return;
   }
   try {

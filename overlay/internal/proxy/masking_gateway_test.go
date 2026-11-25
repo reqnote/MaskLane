@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -96,6 +97,81 @@ func TestMaskingGatewayIntercept(t *testing.T) {
 		!strings.Contains(upstream[1], "顧客Aの<pl:project:1>です。") ||
 		strings.Contains(strings.Join(upstream, ""), "青葉商事") || strings.Contains(strings.Join(upstream, ""), "刷新計画") {
 		t.Fatalf("unexpected forwarded test messages: %v", upstream)
+	}
+}
+
+func TestMaskingGatewayRequestSize(t *testing.T) {
+	t.Setenv("PIPELOCK_HOME", t.TempDir())
+	const limit = MaxMaskingRequestBytes
+	cfg := testScannerConfig()
+	cfg.Internal = nil
+	cfg.RequestBodyScanning.Enabled = true
+	cfg.RequestBodyScanning.MaxBodyBytes = limit
+	p := newTestProxyWithConfig(t, cfg)
+	matcher := &redact.Matcher{}
+	const keyword = "青葉商事"
+	const token = "<pl:company:1>"
+	if err := matcher.AddDictionary(redact.Dictionary{Class: "company", Entries: []string{keyword}}); err != nil {
+		t.Fatal(err)
+	}
+	var decisions []MaskingDecision
+	WithMaskingGateway(MaskingGateway{
+		Rules:  func() MaskingRules { return MaskingRules{Matcher: matcher} },
+		Record: func(result MaskingDecision) { decisions = append(decisions, result) },
+	})(p)
+	forwarded := 0
+	handler := newInterceptHandler(&InterceptContext{
+		TargetHost: "api.vendor.example", TargetPort: "443", Config: cfg, Scanner: p.scannerPtr.Load(),
+		Logger: p.logger, Metrics: p.metrics, ClientIP: "127.0.0.1", RequestID: "size-test", Proxy: p,
+	}, maskingRoundTripper(func(r *http.Request) (*http.Response, error) {
+		forwarded++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if len(body) != limit+2*(len(token)-len(keyword)) ||
+			!bytes.HasPrefix(body, []byte(`{"input":"`+token)) || !bytes.HasSuffix(body, []byte(token+`"}`)) {
+			t.Error("request at the limit was not forwarded in full with both occurrences masked")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")),
+			Header: http.Header{"Content-Type": {"application/json"}}, ContentLength: 2, Request: r}, nil
+	}))
+
+	const prefix, suffix = `{"input":"` + keyword, keyword + `"}`
+	for _, tc := range []struct {
+		name    string
+		size    int
+		chunked bool
+		status  int
+		state   string
+		reason  string
+	}{
+		{"at limit", limit, false, http.StatusOK, "sent", ""},
+		{"one byte over", limit + 1, false, http.StatusRequestEntityTooLarge, "blocked", "body_too_large"},
+		{"chunked over limit", limit + 1, true, http.StatusRequestEntityTooLarge, "blocked", "body_too_large"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := prefix + strings.Repeat(" ", tc.size-len(prefix)-len(suffix)) + suffix
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/chat", strings.NewReader(body))
+			r.Host = "api.vendor.example"
+			r.Header.Set("Content-Type", "application/x-amz-json-1.0")
+			if tc.chunked {
+				r.ContentLength = -1
+				r.TransferEncoding = []string{"chunked"}
+			}
+			w := httptest.NewRecorder()
+			before := len(decisions)
+			handler.ServeHTTP(w, r)
+			if w.Code != tc.status || len(decisions) != before+1 {
+				t.Fatalf("status=%d decisions=%d response=%s", w.Code, len(decisions)-before, w.Body.String())
+			}
+			if got := decisions[before]; got.State != tc.state || got.Reason != tc.reason {
+				t.Fatalf("unexpected decision: %+v", got)
+			}
+		})
+	}
+	if forwarded != 1 {
+		t.Fatalf("upstream received %d requests, want 1", forwarded)
 	}
 }
 

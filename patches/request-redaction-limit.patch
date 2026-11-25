@@ -1,0 +1,13 @@
+diff --git a/internal/proxy/bodyscan.go b/internal/proxy/bodyscan.go
+--- a/internal/proxy/bodyscan.go
++++ b/internal/proxy/bodyscan.go
+@@ -850,6 +850,9 @@ func scanRequestBody(
+ // Returns the buffered body bytes (for re-wrapping) and the scan result.
+ // Fail-closed: oversized bodies and compressed bodies are always blocked.
+ func scanRequestBody(ctx context.Context, req BodyScanRequest) (_ []byte, final BodyScanResult) {
++	if req.maskingRequest != nil {
++		req.RedactLimits.MaxBodyBytes = req.MaxBytes
++	}
+ 	var audienceAllows []scanner.CredentialAudienceAllow
+ 	defer func() {
+ 		final.CredentialAudienceMismatches = scanner.TextDLPCredentialAudienceMismatches(final.DLPMatches, req.suppressTarget(), req.audienceSurface())

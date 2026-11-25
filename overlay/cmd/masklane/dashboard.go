@@ -15,7 +15,7 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/proxy"
 )
 
-//go:embed web/index.html web/app.css web/app.js web/favicon.png
+//go:embed web/index.html web/app.css web/app.js web/restore.mjs web/favicon.png
 var assets embed.FS
 
 type activity struct {
@@ -61,13 +61,18 @@ func (log *activityLog) snapshot() []activity {
 	return rows
 }
 
-func newDashboard(host, token, proxyAddress string, store *mappingStore, log *activityLog) http.Handler {
+func newDashboard(host, token, proxyAddress, certPath string, store *mappingStore, log *activityLog) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", serveAsset("web/index.html", "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /app.css", serveAsset("web/app.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", serveAsset("web/app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /restore.mjs", serveAsset("web/restore.mjs", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /favicon.png", serveAsset("web/favicon.png", "image/png"))
 
+	command := kiroLaunchCommand("http://"+proxyAddress, certPath)
+	mux.HandleFunc("GET /api/kiro-launch", func(w http.ResponseWriter, _ *http.Request) {
+		respond(w, http.StatusOK, map[string]string{"command": command})
+	})
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
 		snapshot := store.active.Load()
 		respond(w, http.StatusOK, map[string]any{

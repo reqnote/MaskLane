@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MaskLane</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="shell header-inner">
+      <span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <h1>MaskLane</h1>
+      <nav class="main-menu" aria-label="メインメニュー">
+        <a href="/" aria-controls="text-tools" aria-current="page">文章ツール</a>
+        <a href="/?view=management" aria-controls="management">通信・キーワード</a>
+        <a href="/?view=usage" aria-controls="usage">使い方</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell">
+    <p id="banner" class="notice error" role="alert" hidden></p>
+    <section id="text-tools" class="workspace text-tools" aria-label="文章ツール">
+      <div id="text-tool-tabs" role="tablist" aria-label="文章の操作">
+        <button type="button" id="restore-tab" role="tab" aria-selected="true" aria-controls="restore-panel">文章の復元</button>
+        <button type="button" id="mask-tab" role="tab" aria-selected="false" aria-controls="mask-panel" tabindex="-1">簡易マスク</button>
+      </div>
+      <div class="text-tool-panel" id="restore-panel" role="tabpanel" aria-labelledby="restore-tab">
+        <form id="restore-form" autocomplete="off">
+          <div class="field">
+            <label for="restore-input">マスキング済みの文章</label>
+            <textarea id="restore-input" rows="5" spellcheck="false" required></textarea>
+          </div>
+          <div class="field" id="restore-source-field" hidden>
+            <label for="restore-source">自動生成された表記の照合先</label>
+            <select id="restore-source"><option value="">登録した置換名だけを使う</option></select>
+          </div>
+          <div class="actions">
+            <button id="restore-run" type="submit" disabled>元の表記に戻す</button>
+          </div>
+          <p class="muted" id="restore-status" role="status"></p>
+          <div id="restore-result" hidden>
+            <div class="field">
+              <label for="restore-output">復元結果</label>
+              <textarea id="restore-output" rows="5" spellcheck="false" readonly></textarea>
+            </div>
+            <button id="restore-copy" class="secondary" type="button">結果をコピー</button>
+          </div>
+        </form>
+      </div>
+      <div class="text-tool-panel" id="mask-panel" role="tabpanel" aria-labelledby="mask-tab" hidden>
+        <form id="mask-form" autocomplete="off">
+          <div class="field">
+            <label for="mask-input">マスクする文章</label>
+            <textarea id="mask-input" rows="5" spellcheck="false" required></textarea>
+          </div>
+          <div class="actions">
+            <button id="mask-run" type="submit" disabled>マスクする</button>
+          </div>
+          <p class="muted" id="mask-status" role="status"></p>
+          <div id="mask-result" hidden>
+            <div class="field">
+              <label for="mask-output">マスク結果</label>
+              <textarea id="mask-output" rows="5" spellcheck="false" readonly></textarea>
+            </div>
+            <div class="actions result-actions">
+              <button id="mask-copy" class="secondary" type="button">結果をコピー</button>
+              <button id="mask-transfer" class="quiet" type="button">復元欄に移す</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </section>
+    <section id="usage" class="workspace usage" aria-labelledby="usage-title" hidden>
+      <h2 id="usage-title">Kiro を MaskLane 経由で起動する</h2>
+      <ol class="usage-steps">
+        <li>Kiro が起動していたら完全に終了します。</li>
+        <li>下のコマンドをコピーし、Windows の PowerShell に貼り付けて実行します。</li>
+        <li>「通信・キーワード」でキーワードを登録し、その語を Kiro のチャットで送信します。「最近の通信」で結果を確認します。</li>
+      </ol>
+      <div class="field">
+        <div class="section-heading">
+          <label for="kiro-launch-output">PowerShell コマンド</label>
+          <button id="kiro-launch-copy" type="button" disabled>コマンドをコピー</button>
+        </div>
+        <textarea id="kiro-launch-output" rows="4" spellcheck="false" readonly></textarea>
+      </div>
+      <p id="kiro-launch-status" class="muted" role="status"></p>
+    </section>
+    <div id="management" class="dashboard" hidden>
+      <section id="connection" class="connection" aria-label="Kiro の接続状況" data-state="waiting">
+        <div class="traces" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="recent">
+          <span class="status-mark" aria-hidden="true"></span>
+          <p id="recent-status" class="status-title" role="status">動作状況を確認中</p>
+          <p class="muted" id="recent-detail" hidden></p>
+        </div>
+        <div class="proxy-control">
+          <p class="muted">Kiro のプロキシ</p>
+          <code id="proxy-address">–</code>
+          <button id="copy-address" class="secondary compact" type="button" disabled>コピー</button>
+        </div>
+        <details id="history" hidden>
+          <summary>最近の通信</summary>
+          <ul id="activity" class="activity"></ul>
+        </details>
+      </section>
+
+      <div class="workspace">
+        <section aria-labelledby="mappings-title">
+          <div class="section-heading">
+            <h2 id="mappings-title">マスキングルール</h2>
+            <button id="add" type="button" aria-controls="editor" disabled>キーワードを追加</button>
+          </div>
+          <table>
+            <thead><tr>
+              <th scope="col" class="select-cell"><input id="all" type="checkbox" aria-label="すべて選択" disabled></th>
+              <th scope="col">種類</th>
+              <th scope="col">マスキング対象のキーワード</th>
+              <th scope="col">
+                置換後の表記
+                <span id="sent-comparison" class="comparison" hidden aria-live="polite"></span>
+                <button id="latest-comparison" class="quiet compact" type="button" hidden>直近に戻る</button>
+              </th>
+              <th scope="col"><span class="sr-only">操作</span></th>
+            </tr></thead>
+            <tbody id="mappings"></tbody>
+          </table>
+          <p id="empty" class="empty" hidden>登録済みのキーワードはありません。</p>
+          <div class="table-footer">
+            <p class="muted" id="selection" hidden></p>
+            <div class="actions">
+              <input id="import-file" type="file" accept=".json,application/json" hidden>
+              <button id="import" class="secondary" type="button" disabled>JSONを読み込む</button>
+              <button id="export" class="secondary" type="button" aria-describedby="export-detail" disabled>選択分を書き出す</button>
+            </div>
+            <p id="export-detail" class="muted" hidden>書き出すJSONにはマスキング対象のキーワードの原文が含まれます。</p>
+          </div>
+        </section>
+
+        <section id="editor" class="editor" aria-labelledby="edit-title" hidden>
+          <h2 id="edit-title">キーワードを追加</h2>
+          <form id="edit-form">
+            <div class="fields">
+              <div class="field">
+                <label for="kind">種類</label>
+                <select id="kind">
+                  <option value="company">企業名</option>
+                  <option value="project">案件名</option>
+                  <option value="person">個人名</option>
+                  <option value="confidential">社外秘</option>
+                  <option value="other">その他</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="original">マスキング対象のキーワード</label>
+                <input id="original" type="text" maxlength="320" required autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <label for="replacement">置換後の表記 <span class="muted">任意</span></label>
+                <input id="replacement" type="text" maxlength="320" autocomplete="off" spellcheck="false" aria-describedby="preview-label">
+              </div>
+            </div>
+            <div class="replacement-preview">
+              <span id="preview-label">空欄時の置換例</span>
+              <output for="kind original replacement">
+                <span id="preview-original">入力したキーワード</span>
+                <span aria-hidden="true">→</span>
+                <code id="preview-result"></code>
+              </output>
+              <small id="preview-hint">末尾の番号は送信内容によって変わります。</small>
+            </div>
+            <p class="notice error" id="edit-error" role="alert" hidden></p>
+            <div class="actions dialog-actions">
+              <button id="edit-cancel" class="secondary" type="button">キャンセル</button>
+              <button id="edit-save" type="submit">キーワードを登録</button>
+            </div>
+          </form>
+        </section>
+        <p id="feedback" class="notice" role="status" hidden></p>
+      </div>
+    </div>
+  </main>
+
+  <dialog id="remove-dialog">
+    <form id="remove-form">
+      <h2>キーワードを削除</h2>
+      <p id="remove-description"></p>
+      <p class="notice error" id="remove-error" role="alert" hidden></p>
+      <div class="actions dialog-actions">
+        <button id="remove-cancel" class="secondary" type="button" autofocus>キャンセル</button>
+        <button id="remove-save" class="danger" type="submit">削除</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog">
+    <form id="import-form">
+      <h2>読み込むルールの確認</h2>
+      <p id="import-summary"></p>
+      <ul id="import-plan" class="import-plan"></ul>
+      <p class="notice error" id="import-error" role="alert" hidden></p>
+      <div class="actions dialog-actions">
+        <button id="import-cancel" class="secondary" type="button">閉じる</button>
+        <button id="import-save" type="submit">追加</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

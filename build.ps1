@@ -11,7 +11,7 @@ $sourceRevision = '556048c1c18d84f7d61d28f686220178a4ff2c4d'
 $sourceRelative = ".build/pipelock-$sourceRevision"
 $source = Join-Path $root $sourceRelative
 $go = Join-Path $work 'go/bin/go.exe'
-$patches = 'pipelock-3.8.0.patch', 'sent-replacements.patch' | ForEach-Object { Join-Path $root "patches/$_" }
+$patches = 'pipelock-3.8.0.patch', 'sent-replacements.patch', 'request-size.patch', 'request-redaction-limit.patch' | ForEach-Object { Join-Path $root "patches/$_" }
 $overlay = Join-Path $root 'overlay'
 
 function Get-VerifiedArchive($Uri, $Archive, $Hash) {
@@ -82,13 +82,13 @@ foreach ($name in $cacheSettings.Keys) {
 Push-Location -LiteralPath $source
 try {
     if ($Test) {
-        & $go test ./cmd/masking-gateway ./internal/redact
+        & $go test ./cmd/masklane ./internal/redact
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
-        & $go test ./internal/proxy -run '^TestMaskingGateway(TLS|Intercept)$'
+        & $go test ./internal/proxy -run '^TestMaskingGateway(TLS|Intercept|RequestSize)$'
         if ($LASTEXITCODE -ne 0) { throw 'Proxy tests failed.' }
     }
     $exe = Join-Path $dist $exeName
-    & $go build -trimpath -buildvcs=false -ldflags '-s -w' -o $exe ./cmd/masking-gateway
+    & $go build -trimpath -buildvcs=false -ldflags '-s -w' -o $exe ./cmd/masklane
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 } finally {
     Pop-Location

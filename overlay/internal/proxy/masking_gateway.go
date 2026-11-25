@@ -7,6 +7,9 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/redact"
 )
 
+// MaxMaskingRequestBytes is the highest configurable request body limit for MaskLane.
+const MaxMaskingRequestBytes = 32 << 20
+
 // MaskingDecision carries counts and the generated tokens of one inspected
 // request. Tokens are keyed by rule index at MappingRevision.
 type MaskingDecision struct {
@@ -45,6 +48,7 @@ type maskingRequest struct {
 	revision  uint64
 	tokens    func(*redact.Redactor) map[int]string
 	automatic map[int]string
+	tooLarge  bool
 	attempted bool
 	sent      bool
 	recorded  bool
@@ -84,6 +88,8 @@ func (r *maskingRequest) finish(report *redact.Report) {
 		record.Automatic = r.automatic
 	case r.attempted:
 		record.State, record.Reason = "unconfirmed", "upstream"
+	case r.tooLarge:
+		record.Reason = "body_too_large"
 	case r.matcher == nil:
 		record.Reason = "no_mapping"
 	case report != nil && report.Applied:

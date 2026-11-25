@@ -3,24 +3,23 @@ MaskLane  Windows 試用ガイド
 ■ 試用担当者の準備
 
 Windows x64 の試用端末で、Kiro IDE の標準エージェントを使います。
-現在の Kiro のプロキシ設定を控え、対象の通信が通るまで架空データだけを使ってください。
+対象の通信が通るまで、架空データだけを使ってください。
 
-1. ZIP を展開し、試用者と同じ Windows アカウントで MaskLane.exe を起動します。
-   ブラウザーに送信状況とマスキングルールの画面が開きます。試用中は起動したウィンドウを開いたままにします。
-   ポートを変える場合は MaskLane.exe -proxy-port 18889 のように起動します。
+1. ZIP を自分専用の書き込み可能なフォルダーに展開し、試用者と同じ Windows アカウントで MaskLane.exe を起動します。
+   旧版から証明書とルールを引き継ぐ場合は、先に「旧版からの更新」を参照してください。
+   ブラウザーに「文章ツール」が開きます。上部の「通信・キーワード」を選ぶと、送信状況とマスキングルールを確認できます。試用中は起動したウィンドウを開いたままにします。
+   証明書、秘密鍵、マスキングルールは、実行ファイルと同じ階層の MaskLane-data に保存されます。
+   管理画面の既定ポートは 18890 です。変更する場合は PowerShell で .\MaskLane.exe -dashboard-port 18891 のように起動します。
+   空きポートを自動で選ぶ場合は -dashboard-port 0 を指定します。手動で開く場合は、起動時に表示される Dashboard の URL を使います。
 
-2. 試用担当者が、社内の手順に沿ってこの端末で生成された ca.pem を Kiro から信頼できるように設定します。
-   保存先は %LOCALAPPDATA%\MaskingGateway\ca.pem です。
-   試用ユーザーの Windows 信頼ストアに登録する場合は、そのユーザーの PowerShell で次を実行します。
+2. Kiro IDE を完全に終了します。MaskLane の上部メニューで「使い方」を開き、「コマンドをコピー」を押します。
+   Windows の PowerShell に貼り付けて実行します。コマンドは Kiro の場所を探し、起動中の MaskLane のプロキシと ca.pem のパスを渡して起動します。
+   Kiro が見つからず入力を求められた場合は、Kiro のショートカットのプロパティにある「リンク先」で Kiro.exe のフルパスを確認してください。
+   Windows の信頼ストアへの登録は不要です。ca-key.pem は MaskLane が使う秘密鍵です。
 
-   certutil.exe -user -addstore Root "$env:LOCALAPPDATA\MaskingGateway\ca.pem"
-
-   ca-key.pem はこの端末上でゲートウェイが使う秘密鍵です。登録するファイルは ca.pem です。
-   試用終了後に取り消せるよう、certutil.exe -dump でこの証明書の拇印を控えます。
-
-3. Kiro の Settings > Proxy で、MaskLane の「Kiro のプロキシ」に表示されたアドレスを設定します。
-   既定は http://127.0.0.1:18888 です。設定を保存し、Kiro を再起動します。
-   アプリは Kiro の米国東部と欧州のモデル用 HTTPS 接続を検査します。
+3. Kiro でローカルのワークスペースを開き、「利用者が行う操作」で送信結果を確認します。
+   Kiro の Settings > Proxy に以前の試用設定が残っている場合は、設定を確認してから起動し直します。
+   MaskLane は Kiro の米国東部と欧州のモデル用 HTTPS 接続を検査します。
    Kiro から先に社内の共通プロキシが必須の環境や別リージョンでは、事前に接続経路を確認してください。
 
 ■ 利用者が行う操作
@@ -74,6 +73,25 @@ inclusion: always
    「置換後の表記」を「顧客A」にしていずれかの手順を繰り返します。
    回答にも「顧客A」が残ることを確認します。
 
+■ 文章を手元でマスクする
+
+「文章ツール」の「簡易マスク」タブを選び、文章を貼り付けて「マスクする」を押します。手順 5 の設定なら
+「青葉物流サービスの日次報告」は「顧客Aの日次報告」になります。置換名が空欄の場合は
+番号付きの表記が入ります。「結果をコピー」でマスクした文章を取り出せます。
+「復元欄に移す」を押すと「文章の復元」タブに切り替わり、結果と照合先が引き継がれます。
+
+■ 文章を元の表記に戻す
+
+初期表示の「文章の復元」タブに回答などを貼り付けて「元の表記に戻す」を押します。
+たとえば手順 5 の「顧客Aの日次報告」は「青葉物流サービスの日次報告」に戻ります。
+この操作には Kiro や LLM への接続は不要です。
+
+<pl:company:1> などの番号付きの表記は、作成元に応じて「直前の簡易マスク」か、
+その回答に対応する Kiro の通信を選んで復元してください。簡易マスクの番号は
+同じブラウザータブで、次のマスク成功・ルール変更・画面の再読み込みまで照合できます。
+結果を確認して「結果をコピー」を押します。対応が不明な番号や、複数の元の語に
+対応する置換名は入力した表記のまま残り、画面にその旨が表示されます。
+
 ■ マスキングルールを共有する
 
 対象の行にチェックを入れ、「選択分を書き出す」を押すと JSON ファイルが保存されます。
@@ -85,16 +103,40 @@ inclusion: always
 
 「キーワードの一致なし」は、対象の本文を検査して登録済みのキーワードに一致する箇所がなかったという結果です。
 「内容を確認できなかった」は、解析できずにゲートウェイが送信を止めたという結果です。
+「送信本文が上限を超えた」は、マスキング前の 1 回の送信本文が上限を超え、MaskLane が送信を止めた結果です。
+上限は既定で 6 MiB（6,144 KiB）です。最大の 32 MiB にする場合は MaskLane.exe -max-request-kib 32768 で起動します。
 「Kiro の対象通信を待機中」は、対象のリクエストが観測されていない状態です。
 このままの場合は、試用担当者が Kiro の接続先とログを確認してください。
 Kiro のバージョン、チャットかファイル参照か、表示された結果を控えると切り分けできます。
 接続確立と両方の置換を確認してから、試用の対象を広げてください。
 
-終了時は Kiro のプロキシ設定を元に戻し、ゲートウェイを終了します。
-試用担当者は CA の拇印を照合し、登録した証明書だけを信頼ストアから取り除きます。
-ユーザーのストアに登録した場合は certutil.exe -user -delstore Root <拇印> が使えます。
+終了時は Kiro と MaskLane を閉じます。
+Kiro の Settings > Proxy を変更した場合は、試用前の値に戻します。
+展開フォルダーを削除すると、MaskLane-data の証明書、秘密鍵、ルールも削除されます。
+
+■ 旧版からの更新
+
+1. 旧版の MaskLane を終了します。エクスプローラーで %LOCALAPPDATA% を開き、既存の MaskLane フォルダーを探します。
+   旧製品名のままの場合は MaskingGateway フォルダーです。すでにポータブルで使っている場合は旧展開先の MaskLane-data です。
+2. 新版を初めて起動する前に、既存のデータフォルダーを新しい展開先へ移し、名前を MaskLane-data にします。
+   同じ展開先を使っている場合は、既存の MaskLane-data がそのまま使われます。
+3. 旧手順で Windows の信頼ストアに登録した場合は、certutil.exe -dump で ca.pem の拇印を確認し、該当する登録を取り除きます。
+   現在のユーザーのストアに登録した証明書は、certutil.exe -user -delstore Root <拇印> で取り除けます。
+
+Windows プロファイルの保存先を引き続き使う場合は MaskLane.exe -portable=false で起動します。
+保存先を直接指定している場合は、既存の -data-dir を使えます。
+
+■ Codex CLI のローカル接続試験で証明書を使う
+
+試験専用の PowerShell で MaskLane の展開先を開き、CLI の起動前に次の行を実行します。
+
+   $env:CODEX_CA_CERTIFICATE = (Resolve-Path -LiteralPath '.\MaskLane-data\ca.pem' -ErrorAction Stop).Path
+
+証明書だけ先に生成する場合は MaskLane.exe -certificate-only を使います。
 
 参考
 https://kiro.dev/docs/privacy-and-security/firewalls/
 https://kiro.dev/docs/steering/
+https://nodejs.org/api/cli.html#node_extra_ca_certsfile
 https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil
+https://learn.chatgpt.com/docs/auth?surface=cli#custom-ca-bundles

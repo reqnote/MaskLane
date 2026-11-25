@@ -1,0 +1,41 @@
+diff --git a/internal/proxy/bodyscan.go b/internal/proxy/bodyscan.go
+--- a/internal/proxy/bodyscan.go
++++ b/internal/proxy/bodyscan.go
+@@ -718,5 +718,7 @@ type BodyScanResult struct {
+ 	// RedactionBlockReason carries a redact.BlockReason value when the
+ 	// fail-closed redaction path triggered a block. Empty otherwise.
+ 	RedactionBlockReason redact.BlockReason
++	// bodyTooLarge marks a request above its configured body limit.
++	bodyTooLarge bool
+ 	// CredentialAudienceReceiptErr is set when a credential-audience-allow
+ 	// receipt could not be durably confirmed and
+@@ -909,9 +911,10 @@ func scanRequestBody(
+ 	// Overflow: fail-closed block regardless of configured action.
+ 	if len(buf) > req.MaxBytes {
+ 		return nil, BodyScanResult{
+-			Clean:  false,
+-			Action: config.ActionBlock,
+-			Reason: fmt.Sprintf("request body exceeds max_body_bytes (%d)", req.MaxBytes),
++			Clean:        false,
++			Action:       config.ActionBlock,
++			Reason:       fmt.Sprintf("request body exceeds max_body_bytes (%d)", req.MaxBytes),
++			bodyTooLarge: true,
+ 		}
+ 	}
+ 
+diff --git a/internal/proxy/intercept.go b/internal/proxy/intercept.go
+--- a/internal/proxy/intercept.go
++++ b/internal/proxy/intercept.go
+@@ -1558,6 +1558,11 @@ func newInterceptHandler(
+ 					}))
+ 					setBodyResultHint(w, scannerLabel, reason)
++					status := http.StatusForbidden
++					if gatewayRequest != nil && result.bodyTooLarge {
++						gatewayRequest.tooLarge = true
++						status = http.StatusRequestEntityTooLarge
++					}
+ 					writeBlockedError(w, blockInfo(scannerLabel).WithRequestID(ic.RequestID),
+-						"blocked: "+reason, http.StatusForbidden)
++						"blocked: "+reason, status)
+ 					return
+ 				}

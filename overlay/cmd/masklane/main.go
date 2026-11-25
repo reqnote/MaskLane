@@ -27,6 +27,15 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/signing"
 )
 
+const (
+	productName          = "MaskLane"
+	defaultProxyPort     = 18888
+	defaultDashboardPort = 18890
+	bytesPerKiB          = 1024
+	defaultMaxRequestKiB = 6 * bytesPerKiB
+	maxRequestKiB        = proxy.MaxMaskingRequestBytes / bytesPerKiB
+)
+
 var modelHosts = []string{
 	"q.us-east-1.amazonaws.com", "q.eu-central-1.amazonaws.com",
 	"runtime.us-east-1.kiro.dev", "runtime.eu-central-1.kiro.dev",
@@ -49,21 +58,53 @@ func main() {
 }
 
 func run() error {
-	proxyPort := flag.Int("proxy-port", 18888, "loopback HTTPS proxy port")
-	dataDir := flag.String("data-dir", "", "override the Windows profile data directory")
+	proxyPort := flag.Int("proxy-port", defaultProxyPort, "loopback HTTPS proxy port")
+	dashboardPort := flag.Int("dashboard-port", defaultDashboardPort, "loopback dashboard port (0 picks an available port)")
+	requestLimit := flag.Int("max-request-kib", defaultMaxRequestKiB, fmt.Sprintf("maximum inspected request body size in KiB (1–%d)", maxRequestKiB))
+	dataDir := flag.String("data-dir", "", "override the data directory")
+	portable := flag.Bool("portable", true, "store data next to MaskLane.exe; set false to use the Windows profile")
 	certificateOnly := flag.Bool("certificate-only", false, "prepare and print the CA certificate path")
 	noBrowser := flag.Bool("no-browser", false, "print the dashboard URL without opening it")
 	flag.Parse()
 	if *proxyPort < 1 || *proxyPort > 65535 {
 		return errors.New("プロキシのポート番号を 1〜65535 の範囲で指定してください。")
 	}
-	if *dataDir == "" {
+	if *dashboardPort < 0 || *dashboardPort > 65535 {
+		return errors.New("管理画面のポート番号を 0〜65535 の範囲で指定してください。0 は自動選択です。")
+	}
+	if *dashboardPort == *proxyPort {
+		return errors.New("-proxy-port と -dashboard-port には異なるポート番号を指定してください。")
+	}
+	if *requestLimit < 1 || *requestLimit > maxRequestKiB {
+		return fmt.Errorf("送信本文の上限を 1〜%d KiB の範囲で指定してください。", maxRequestKiB)
+	}
+	switch {
+	case *dataDir != "":
+		var portableSpecified bool
+		flag.Visit(func(option *flag.Flag) {
+			if option.Name == "portable" {
+				portableSpecified = true
+			}
+		})
+		if *portable && portableSpecified {
+			return errors.New("-portable と -data-dir は同時に指定できません。")
+		}
+	case *portable:
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("MaskLane.exe の保存先を取得できませんでした。 %w", err)
+		}
+		*dataDir = filepath.Join(filepath.Dir(executable), "MaskLane-data")
+	default:
 		local := os.Getenv("LOCALAPPDATA")
 		if local == "" {
 			return errors.New("Windows のローカルアプリデータフォルダーを取得できませんでした。")
 		}
-		// Keep the existing mappings and trusted CA after the product rename.
-		*dataDir = filepath.Join(local, "MaskingGateway")
+		dir, err := profileDataDirectory(local)
+		if err != nil {
+			return err
+		}
+		*dataDir = dir
 	}
 	home, err := filepath.Abs(*dataDir)
 	if err != nil {
@@ -88,7 +129,29 @@ func run() error {
 	signing.PipelockHome = home
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return serve(ctx, home, certPath, keyPath, *proxyPort, !*noBrowser)
+	return serve(ctx, home, certPath, keyPath, *proxyPort, *dashboardPort, *requestLimit*bytesPerKiB, !*noBrowser)
+}
+
+func profileDataDirectory(local string) (string, error) {
+	dir := filepath.Join(local, productName)
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		return dir, err
+	}
+
+	// Move the mappings and trusted CA together. Windows refuses to move the
+	// directory while the previous executable has its lock file open.
+	err := os.Rename(filepath.Join(local, "MaskingGateway"), dir)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return dir, nil
+	}
+	if _, statErr := os.Stat(dir); statErr == nil {
+		return dir, nil // Another launch may have just completed the move.
+	}
+	var renameErr *os.LinkError
+	if errors.As(err, &renameErr) {
+		err = renameErr.Err
+	}
+	return "", fmt.Errorf("MaskLane のデータフォルダーに移行できません。以前のアプリを終了してから起動し直してください。 %w", err)
 }
 
 func ensureCA(dir string) (string, string, error) {
@@ -97,7 +160,7 @@ func ensureCA(dir string) (string, string, error) {
 	_, certErr := os.Stat(certPath)
 	_, keyErr := os.Stat(keyPath)
 	if errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist) {
-		cert, key, _, err := certgen.GenerateCA("MaskLane", 365*24*time.Hour)
+		cert, key, _, err := certgen.GenerateCA(productName, 365*24*time.Hour)
 		if err != nil {
 			return "", "", err
 		}
@@ -116,7 +179,7 @@ func ensureCA(dir string) (string, string, error) {
 	return certPath, keyPath, nil
 }
 
-func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, openBrowser bool) error {
+func serve(ctx context.Context, home, certPath, keyPath string, proxyPort, dashboardPort, maxRequestBytes int, openBrowser bool) error {
 	store, err := openMappings(filepath.Join(home, "mappings.json"))
 	if err != nil {
 		return fmt.Errorf("保存済みのマスキングルールを読み込めませんでした。 %w", err)
@@ -126,12 +189,13 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 	proxyAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort))
 	proxyListener, err := net.Listen("tcp4", proxyAddress)
 	if err != nil {
-		return fmt.Errorf("プロキシを起動できません。アプリがすでに起動しているか、ポートが使用中です。 %w", err)
+		return fmt.Errorf("プロキシを %s で起動できません。アプリがすでに起動しているか確認し、必要なら -proxy-port で変更してください。 %w", proxyAddress, err)
 	}
 	defer proxyListener.Close()
-	uiListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	dashboardAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(dashboardPort))
+	uiListener, err := net.Listen("tcp4", dashboardAddress)
 	if err != nil {
-		return err
+		return fmt.Errorf("管理画面を %s で起動できません。-dashboard-port で別のポートを指定するか、-dashboard-port 0 で自動選択してください。 %w", dashboardAddress, err)
 	}
 	defer uiListener.Close()
 
@@ -146,6 +210,7 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 	cfg.TLSInterception.CAKeyPath = keyPath
 	cfg.TLSInterception.PassthroughDomains = connectionHosts
 	cfg.RequestBodyScanning.Enabled = true
+	cfg.RequestBodyScanning.MaxBodyBytes = maxRequestBytes
 	cfg.RequestBodyScanning.IssuerBoundSessionCookies = false
 	cfg.DLP.ScanEnv = false
 	if err := cfg.Validate(); err != nil {
@@ -170,9 +235,12 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 		return err
 	}
 	defer gateway.Close()
+	if err := gateway.LoadCertCache(cfg); err != nil {
+		return fmt.Errorf("HTTPS 通信の検査を準備できませんでした。 %w", err)
+	}
 
 	token := hex.EncodeToString(randBytes())
-	dashboard := newDashboard(uiListener.Addr().String(), token, proxyAddress, store, status)
+	dashboard := newDashboard(uiListener.Addr().String(), token, proxyAddress, certPath, store, status)
 	proxyServer := newServer(ctx, kiroConnections(gateway.Handler(), cfg.APIAllowlist))
 	uiServer := newServer(ctx, dashboard)
 	errorsCh := make(chan error, 2)
@@ -180,9 +248,10 @@ func serve(ctx context.Context, home, certPath, keyPath string, proxyPort int, o
 	go func() { errorsCh <- uiServer.Serve(uiListener) }()
 
 	url := "http://" + uiListener.Addr().String() + "/#" + token
-	fmt.Println("MaskLane")
+	fmt.Println(productName)
 	fmt.Println("Dashboard:", url)
 	fmt.Println("Kiro proxy:", "http://"+proxyAddress)
+	fmt.Println("Request body limit (KiB):", maxRequestBytes/bytesPerKiB)
 	fmt.Println("CA:", certPath)
 	if openBrowser {
 		command := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)

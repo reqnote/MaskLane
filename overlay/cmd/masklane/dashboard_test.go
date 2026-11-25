@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +14,25 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/proxy"
 	"github.com/luckyPipewrench/pipelock/internal/redact"
 )
+
+func TestMaskLaneRejectsInvalidTLSAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PIPELOCK_HOME", dir)
+	certPath, keyPath, err := ensureCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("invalid CA key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = serve(ctx, dir, certPath, keyPath, 0, 0, defaultMaxRequestKiB*bytesPerKiB, false)
+	if err == nil || !strings.Contains(err.Error(), "HTTPS 通信の検査を準備できませんでした") {
+		t.Fatalf("expected HTTPS setup to fail at startup, got %v", err)
+	}
+}
 
 func TestMaskingGatewayDashboardWorkflow(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "mappings.json")
@@ -22,7 +43,7 @@ func TestMaskingGatewayDashboardWorkflow(t *testing.T) {
 	const host = "127.0.0.1:40000"
 	const token = "test-session"
 	log := &activityLog{}
-	handler := newDashboard(host, token, "127.0.0.1:18888", store, log)
+	handler := newDashboard(host, token, "127.0.0.1:18888", filepath.Join(t.TempDir(), "ca.pem"), store, log)
 	call := func(method, route, body, session, origin string, expected int) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, "http://"+host+route, strings.NewReader(body))
@@ -100,6 +121,34 @@ func TestMaskingGatewayDashboardWorkflow(t *testing.T) {
 		len(row.Automatic) != 2 || row.Automatic[3] != "<pl:person:1>" || row.Automatic[4] != "<pl:confidential:1>" ||
 		strings.Contains(state.Body.String(), "港野ミナ") || strings.Contains(state.Body.String(), "未発表計画A") {
 		t.Fatalf("unexpected activity: %s", state.Body.String())
+	}
+}
+
+func TestKiroLaunchCommandRequiresDashboardSession(t *testing.T) {
+	const host = "127.0.0.1:40000"
+	const token = "test-session"
+	const certPath = "D:\\MaskLane 資料\\O'Brien’s\\ca.pem"
+	handler := newDashboard(host, token, "127.0.0.1:29647", certPath, &mappingStore{}, &activityLog{})
+	request := httptest.NewRequest(http.MethodGet, "http://"+host+"/api/kiro-launch", nil)
+	denied := httptest.NewRecorder()
+	handler.ServeHTTP(denied, request)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated launch command: HTTP %d", denied.Code)
+	}
+	request.Header.Set("X-Masking-Session", token)
+	allowed := httptest.NewRecorder()
+	handler.ServeHTTP(allowed, request)
+	var result struct{ Command string }
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("authenticated launch command: HTTP %d", allowed.Code)
+	}
+	if err := json.Unmarshal(allowed.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(result.Command, "\r\n") ||
+		!strings.Contains(result.Command, "O''Brien’’") ||
+		!strings.Contains(result.Command, "'http://127.0.0.1:29647'") {
+		t.Fatalf("unexpected launch command: %q", result.Command)
 	}
 }
 
