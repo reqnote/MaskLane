@@ -4,3 +4,5 @@
 2. 毎回の修正で、ユーザーエクスペリエンス、開発者エクスペリエンス、AI エージェントの利用体験をすべて考慮し、それぞれを改善する。既存機能の動作を維持する。
 
 配布用 ZIP の更新とコミットは、ユーザーから指示があったタイミングで行う。
+
+このプロジェクトで「UIスキル」と指定されたら、[anything-frontend-art-direction](.agents/skills/anything-frontend-art-direction/SKILL.md) を使う。
